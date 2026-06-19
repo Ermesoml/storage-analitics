@@ -1,0 +1,11 @@
+[package]
+name = "storage_analytics"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.8"
+crossterm = "0.28"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
