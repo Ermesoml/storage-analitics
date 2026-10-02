@@ -27,7 +27,8 @@ Lightweight Rust TUI for browsing disk usage on Windows.
 - Some protected folders may report access errors. The scan still continues for the rest of the tree.
 - Large folders can take time to total; the UI stays responsive, shows partial sizes early, and scans sibling folders with a small worker pool.
 - Cached folder values are shown immediately as `(...cached)` and are then validated or recomputed in the background.
-- The cache database is stored next to the app as `storage_analytics_cache.sqlite3`.
+- The cache database is stored in the current working directory as `storage_analytics_cache.sqlite3`.
+- The cache contains local directory paths, sizes, and timestamps. Keep it and its SQLite journal files private; they are excluded from Git.
 - The folder fingerprint is metadata-based so the cache stays fast; a refresh updates the stored values when folder listings no longer match the cache.
 
 ## Run
