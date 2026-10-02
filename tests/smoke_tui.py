@@ -50,6 +50,23 @@ def smoke(binary):
                     break
             raise AssertionError(f"TUI did not show {text!r}; exit={process.poll()}; output={bytes(output[-3000:])!r}")
 
+        def wait_for_cache(path, size):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                with sqlite3.connect(work / "storage_analytics_cache.sqlite3") as cache:
+                    row = cache.execute(
+                        "SELECT recursive_size FROM directory_cache WHERE display_path = ?", (str(path),)
+                    ).fetchone()
+                cache.close()
+                if row == (size,):
+                    return
+                if process.poll() is not None:
+                    break
+                # Drain repaint output while the background scanner finishes.
+                if select.select([master], [], [], 0.05)[0]:
+                    output.extend(os.read(master, 65536))
+            raise AssertionError("Background scan did not update the cached folder size")
+
         try:
             wait_for("4.00 KB")
             output.clear()
@@ -62,6 +79,7 @@ def smoke(binary):
             output.clear()
             os.write(master, b"\x7f")
             wait_for("tiny.txt")
+            wait_for_cache(nested, 4097)
             os.write(master, b"q")
             assert process.wait(timeout=10) == 0
         finally:
