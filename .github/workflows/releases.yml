@@ -1,0 +1,81 @@
+name: Linux minor releases
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-linux-releases
+  queue: max
+
+env:
+  RELEASE_ACTOR: ${{ github.actor }}
+  RELEASE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+
+jobs:
+  authorize:
+    if: github.repository == 'Ermesoml/storage-analitics' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require repository admins for the original trigger and reruns
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/releases.py authorize
+
+  build:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find unreleased main commits and allocate stable minor versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_HEAD: ${{ github.sha }}
+        run: python3 .github/scripts/releases.py plan --head "$RELEASE_HEAD"
+      - name: Install pinned Rust and static Linux build tools
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Test, build and package every pending commit
+        env:
+          RELEASE_HEAD: ${{ github.sha }}
+        run: python3 .github/scripts/releases.py build --head "$RELEASE_HEAD"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-release-bundle
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-release-bundle
+          path: dist/
+      - name: Recheck admin permissions and publish complete release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_HEAD: ${{ github.sha }}
+        run: python3 .github/scripts/releases.py publish --head "$RELEASE_HEAD"

@@ -1,6 +1,6 @@
 /target
+/dist
 **/*.rs.bk
-Cargo.lock
 
 # IDE
 .idea/
@@ -30,3 +30,6 @@ Thumbs.db
 !.env.sample
 *.pem
 *.key
+
+# Python test helpers
+__pycache__/
