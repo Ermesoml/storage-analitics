@@ -1,6 +1,8 @@
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod app;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
+mod opencode;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod platform;
 
 const VERSION: &str = match option_env!("STORAGE_ANALYTICS_VERSION") {

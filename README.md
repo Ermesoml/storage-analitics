@@ -1,6 +1,7 @@
 # Storage Analytics
 
-Lightweight Rust TUI for browsing disk usage on Windows and Linux.
+Lightweight Rust TUI for browsing disk usage on Windows and Linux, with an
+embedded OpenCode AI assistant.
 
 ## What it does
 
@@ -11,10 +12,64 @@ Lightweight Rust TUI for browsing disk usage on Windows and Linux.
 - Scans each level on demand instead of indexing the whole machine up front.
 - Streams partial folder sizes while the recursive total is still being calculated.
 - Stores folder fingerprints and recursive sizes in a local SQLite cache for faster repeated runs.
+- Splits the terminal into a 60/40 layout: disk analytics on the left and an AI chat on the right.
+
+## AI chat
+
+The chat pane connects to an OpenCode server started by the app. It uses your
+existing OpenCode configuration and providers, so every model you already have
+configured is available from the model picker.
+
+- The default model is `opencode-go/deepseek-v4.1-flash`. If that model is not
+  available, the app uses the first configured model and shows a warning.
+- Each prompt automatically includes the current view, the folder or drive being
+  inspected, the selected item, the visible entries with their sizes, and the
+  current scan progress. The assistant can then answer questions or use tools
+  (`read`, `write`, `edit`, `bash`, `grep`, and so on) against the real files.
+- Tool actions that require approval show a permission dialog in the app.
+  Choose `y` to allow once, `a` to always allow, or `n` / `Esc` to reject.
+- The assistant runs tools with the app's working directory as the OpenCode
+  project root. Absolute paths from the attached context work for other drives.
+- Use `Tab`, `Shift+Tab`, or the mouse to switch between the analytics pane and
+  the chat pane.
+
+### Chat controls
+
+- `Enter`: send the prompt
+- `Shift+Enter`: insert a newline
+- `Tab` / `Shift+Tab`: switch focus between analytics and chat
+- `Ctrl+M`: choose the model
+- `Ctrl+N`: start a new chat session
+- `Ctrl+C`: abort the current response
+- `Ctrl+R`: retry the chat connection after a failure
+- `Ctrl+T`: show or hide model reasoning
+- `Up` / `Down`, `PageUp` / `PageDown`, `Ctrl+Home` / `Ctrl+End`: scroll chat history
+- `Esc`: return focus to the analytics pane
+- `Ctrl+Q`: quit
+
+Mouse clicks switch focus; the mouse wheel scrolls the chat or moves the
+selection in the analytics pane.
+
+The first launch of the chat can take a few seconds while `opencode serve`
+starts and loads your configuration. The analytics pane keeps working if
+OpenCode is not installed or cannot start.
+
+### Configuration
+
+The app starts a local `opencode serve` process on a free loopback port with a
+generated basic-auth password. You can override this behavior with environment
+variables:
+
+- `OPENCODE_BIN`: path to the OpenCode executable if it is not on `PATH`.
+- `OPENCODE_SERVER_URL`: connect to an already-running OpenCode server instead
+  of starting one (for example `http://127.0.0.1:4096`). If the external server
+  uses HTTP basic auth, set `OPENCODE_SERVER_USERNAME` and
+  `OPENCODE_SERVER_PASSWORD` as well.
 
 ## Controls
 
 - `Up` / `Down` or `j` / `k`: move selection
+- `Home` / `End`, `PageUp` / `PageDown`: jump to the start/end or move by a page
 - `Enter`: open the selected drive or folder
 - `Backspace` or `Esc`: go up one level
 - `d`: return to the drive list
@@ -34,6 +89,9 @@ Lightweight Rust TUI for browsing disk usage on Windows and Linux.
 - The cache database is stored in the current working directory as `storage_analytics_cache.sqlite3`.
 - The cache contains local directory paths, sizes, and timestamps. Keep it and its SQLite journal files private; they are excluded from Git.
 - The folder fingerprint is metadata-based so the cache stays fast; a refresh updates the stored values when folder listings no longer match the cache.
+- OpenCode's interactive question prompts are not implemented in the embedded
+  chat yet; such prompts are declined so the assistant can continue with a
+  normal chat message.
 
 ## Run
 
@@ -47,6 +105,16 @@ cargo run --locked -- --version
 
 Linux and Windows builds use the pinned Rust toolchain and committed `Cargo.lock`.
 Deletion bypasses the recycle bin/trash; cancel the confirmation to keep an item.
+The AI chat requires OpenCode to be installed and configured (`opencode auth login`
+or an existing provider configuration). The analytics pane works without it.
+
+To produce a self-contained Windows executable locally:
+
+```powershell
+$env:RUSTFLAGS = "-C target-feature=+crt-static"
+cargo build --locked --release
+# target/release/storage_analytics.exe
+```
 
 ## Linux verification with Ubuntu Docker
 

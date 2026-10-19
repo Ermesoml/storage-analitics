@@ -1,16 +1,7 @@
-use super::human_bytes;
+use ratatui::backend::TestBackend;
+use serde_json::json;
 
-#[test]
-fn formats_small_bytes() {
-    assert_eq!(human_bytes(999), "999 B");
-    assert_eq!(human_bytes(1024), "1.00 KB");
-}
-
-#[test]
-fn formats_large_bytes() {
-    assert_eq!(human_bytes(10 * 1024 * 1024), "10.0 MB");
-    assert_eq!(human_bytes(250 * 1024 * 1024 * 1024), "250 GB");
-}
+use super::*;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -164,4 +155,252 @@ mod linux {
         assert!(policy.check_deletion(&root.join("direct")).is_ok());
         assert!(ScanPolicy::new(Path::new("/proc")).is_err());
     }
+}
+
+fn test_app() -> App {
+    let (scanner_tx, scanner_rx) = mpsc::channel();
+    let (deletion_tx, deletion_rx) = mpsc::channel();
+    let (chat_tx, chat_rx) = mpsc::channel();
+    let empty = Rect {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+
+    let mut chat = ChatState::new();
+    chat.phase = ChatPhase::Ready;
+    chat.stream_connected = true;
+    chat.selected_model = Some(default_model_choice());
+    chat.push_notice("Connected to OpenCode test.");
+    chat.push_user_echo("What is using space?".to_string());
+    chat.push_notice("The largest entry is big-folder.");
+
+    App {
+        view: View::Directory,
+        drives: Vec::new(),
+        drives_state: TableState::default(),
+        entries: vec![
+            EntryInfo {
+                path: PathBuf::from("D:\\test\\big-folder"),
+                name: "big-folder".to_string(),
+                kind: EntryKind::Directory,
+                size_bytes: 123_456_789,
+                size_state: SizeState::Complete,
+            },
+            EntryInfo {
+                path: PathBuf::from("D:\\test\\file.bin"),
+                name: "file.bin".to_string(),
+                kind: EntryKind::File,
+                size_bytes: 42_000,
+                size_state: SizeState::Complete,
+            },
+        ],
+        entries_state: select_first(TableState::default(), 2),
+        current_root: Some(PathBuf::from("D:\\")),
+        current_path: Some(PathBuf::from("D:\\test")),
+        scan_progress: ScanProgress {
+            request_id: 1,
+            total_entries: 2,
+            resolved_entries: 2,
+            error_count: 0,
+            started: true,
+            scanning: false,
+        },
+        scanner_tx,
+        scanner_rx,
+        scan_generation: Arc::new(AtomicU64::new(1)),
+        cache_store: CacheStore {
+            db_path: Arc::new(PathBuf::from("test-cache.sqlite3")),
+        },
+        status: "Finished scanning.".to_string(),
+        spinner_index: 0,
+        last_content_height: 10,
+        user_moved_selection: false,
+        pending_delete: None,
+        is_deleting: false,
+        deletion_tx,
+        deletion_rx,
+        focus: Focus::Chat,
+        chat,
+        chat_tx,
+        chat_rx,
+        chat_init_in_flight: false,
+        explorer_area: empty,
+        chat_area: empty,
+        chat_transcript_area: empty,
+        chat_input_area: empty,
+    }
+}
+
+#[test]
+fn formats_small_bytes() {
+    assert_eq!(human_bytes(999), "999 B");
+    assert_eq!(human_bytes(1024), "1.00 KB");
+}
+
+#[test]
+fn formats_large_bytes() {
+    assert_eq!(human_bytes(10 * 1024 * 1024), "10.0 MB");
+    assert_eq!(human_bytes(250 * 1024 * 1024 * 1024), "250 GB");
+}
+fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn draws_chat_layout_in_all_states() {
+    let mut app = test_app();
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("AI Chat"));
+    assert!(text.contains("What is using space?"));
+    assert!(text.contains("Message"));
+    assert!(text.contains("opencode-go/deepseek-v4.1-flash"));
+
+    app.focus = Focus::Explorer;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    app.chat.models = vec![default_model_choice()];
+    app.chat.model_picker = Some(ModelPicker {
+        filter: "deep".to_string(),
+        selected: 0,
+    });
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Select Model"));
+    assert!(text.contains("Filter: deep"));
+
+    app.chat.model_picker = None;
+    app.chat.permission = Some(PermissionPrompt {
+        id: "per_1".to_string(),
+        permission: "bash".to_string(),
+        patterns: vec!["rm -rf".to_string()],
+    });
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Permission Required"));
+    assert!(text.contains("bash"));
+}
+
+#[test]
+fn wraps_text_at_word_boundaries() {
+    assert_eq!(wrap_text("hello world", 5), vec!["hello", "world"]);
+    assert_eq!(wrap_text("abcdefgh", 4), vec!["abcd", "efgh"]);
+    assert_eq!(wrap_text("", 4), vec![""]);
+}
+
+#[test]
+fn splits_text_at_character_index() {
+    assert_eq!(split_at_char("abc", 1), ("a".to_string(), "bc".to_string()));
+    assert_eq!(
+        split_at_char("ação", 2),
+        ("aç".to_string(), "ão".to_string())
+    );
+}
+
+#[test]
+fn applies_streamed_text_deltas() {
+    let mut chat = ChatState::new();
+    chat.apply_message_updated(&json!({
+        "id": "msg_1",
+        "role": "assistant",
+        "time": {}
+    }));
+    chat.apply_part_updated(&json!({
+        "id": "prt_1",
+        "messageID": "msg_1",
+        "type": "text",
+        "text": ""
+    }));
+    chat.apply_part_delta(&json!({
+        "messageID": "msg_1",
+        "partID": "prt_1",
+        "field": "text",
+        "delta": "Hel"
+    }));
+    chat.apply_part_delta(&json!({
+        "messageID": "msg_1",
+        "partID": "prt_1",
+        "field": "text",
+        "delta": "lo"
+    }));
+
+    assert_eq!(chat.messages[0].parts[0].text, "Hello");
+}
+
+#[test]
+fn chat_context_includes_current_folder_and_selection() {
+    let app = test_app();
+    let context = app.chat_context();
+
+    assert!(context.starts_with(CHAT_CONTEXT_MARKER));
+    assert!(context.contains("Current folder: D:\\test"));
+    assert!(context.contains("Selected item: [dir] big-folder"));
+    assert!(context.contains("D:\\test\\big-folder"));
+    assert!(context.contains("file.bin"));
+}
+
+#[test]
+fn queues_permission_requests() {
+    let mut chat = ChatState::new();
+    chat.enqueue_permission(&json!({
+        "id": "per_1",
+        "sessionID": "ses_1",
+        "permission": "bash",
+        "patterns": ["rm -rf"]
+    }));
+    chat.enqueue_permission(&json!({
+        "id": "per_2",
+        "sessionID": "ses_1",
+        "permission": "edit",
+        "patterns": ["src/main.rs"]
+    }));
+
+    assert_eq!(chat.permission.as_ref().unwrap().id, "per_1");
+    chat.activate_next_permission();
+    assert_eq!(chat.permission.as_ref().unwrap().id, "per_2");
+}
+
+#[test]
+fn filters_models_by_provider_and_name() {
+    let models = vec![
+        ModelChoice {
+            provider_id: "opencode-go".to_string(),
+            provider_name: "OpenCode Go".to_string(),
+            model_id: "deepseek-v4.1-flash".to_string(),
+            model_name: "DeepSeek V4.1 Flash".to_string(),
+        },
+        ModelChoice {
+            provider_id: "openai".to_string(),
+            provider_name: "OpenAI".to_string(),
+            model_id: "gpt-5.6".to_string(),
+            model_name: "GPT 5.6".to_string(),
+        },
+    ];
+
+    let chat = ChatState {
+        models: models.clone(),
+        ..ChatState::new()
+    };
+
+    assert_eq!(chat.filtered_model_indices("deepseek"), vec![0]);
+    assert_eq!(chat.filtered_model_indices("openai"), vec![1]);
+    assert_eq!(chat.filtered_model_indices("open"), vec![0, 1]);
+}
+
+#[test]
+fn formats_token_counts() {
+    assert_eq!(compact_tokens(999), "999");
+    assert_eq!(compact_tokens(1_500), "1.5k");
+    assert_eq!(compact_tokens(2_500_000), "2.5M");
 }
