@@ -41,11 +41,16 @@ configured is available from the model picker.
 - `Ctrl+M`: choose the model
 - `Ctrl+N`: start a new chat session
 - `Ctrl+C`: abort the current response
+- `Ctrl+Y`: toggle YOLO mode (auto-approve permission requests)
 - `Ctrl+R`: retry the chat connection after a failure
 - `Ctrl+T`: show or hide model reasoning
 - `Up` / `Down`, `PageUp` / `PageDown`, `Ctrl+Home` / `Ctrl+End`: scroll chat history
 - `Esc`: return focus to the analytics pane
 - `Ctrl+Q`: quit
+
+YOLO mode auto-approves every permission request for the current chat and shows
+a `YOLO` badge in the chat title and status line. Each request is approved once;
+turning YOLO off restores the normal permission dialog.
 
 Mouse clicks switch focus; the mouse wheel scrolls the chat or moves the
 selection in the analytics pane.
@@ -73,7 +78,7 @@ variables:
 - `Enter`: open the selected drive or folder
 - `Backspace` or `Esc`: go up one level
 - `d`: return to the drive list
-- `r`: refresh the current view
+- `r` / `R`: for folders, clear the current folder's cached sizes and rescan it from scratch; for the drive list, refresh the drives
 - `Delete`: permanently delete the selected item after confirmation
 - `q`: quit
 
@@ -86,6 +91,8 @@ variables:
 - Some protected folders may report access errors. The scan still continues for the rest of the tree.
 - Large folders can take time to total; the UI stays responsive, shows partial sizes early, and scans sibling folders with a small worker pool.
 - Cached folder values are shown immediately as `(...cached)` and are then validated or recomputed in the background.
+- Folders with child directories are revalidated by traversing their children, so changes to files deep inside a tree update the parent total. Leaf folders can reuse their cached size when their listing fingerprint still matches.
+- Press `r` / `R` in a folder to delete its cache subtree and force a full recompute.
 - The cache database is stored in the current working directory as `storage_analytics_cache.sqlite3`.
 - The cache contains local directory paths, sizes, and timestamps. Keep it and its SQLite journal files private; they are excluded from Git.
 - The folder fingerprint is metadata-based so the cache stays fast; a refresh updates the stored values when folder listings no longer match the cache.

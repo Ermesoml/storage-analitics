@@ -258,6 +258,7 @@ struct ChatState {
     pending_echo_id: Option<String>,
     pending_prompt_text: String,
     show_reasoning: bool,
+    yolo: bool,
     next_local_id: u64,
 }
 
@@ -285,6 +286,7 @@ impl ChatState {
             pending_echo_id: None,
             pending_prompt_text: String::new(),
             show_reasoning: true,
+            yolo: false,
             next_local_id: 0,
         }
     }
@@ -781,6 +783,28 @@ impl CacheStore {
         .map_err(sqlite_err_to_io)?;
         Ok(conn)
     }
+
+    fn delete_subtree(&self, path: &Path) -> io::Result<usize> {
+        let conn = self.open_connection()?;
+        let display_path = path.to_string_lossy().to_string();
+        let prefix = cache_subtree_prefix(&display_path);
+
+        #[cfg(target_os = "windows")]
+        let sql = r#"
+            DELETE FROM directory_cache
+            WHERE lower(replace(display_path, '/', '\')) = lower(replace(?1, '/', '\'))
+               OR lower(replace(display_path, '/', '\')) LIKE lower(replace(?2, '/', '\')) ESCAPE '!'
+            "#;
+
+        #[cfg(target_os = "linux")]
+        let sql = "
+            DELETE FROM directory_cache
+            WHERE display_path = ?1 OR display_path LIKE ?2 ESCAPE '!'
+            ";
+
+        conn.execute(sql, params![display_path, prefix])
+            .map_err(sqlite_err_to_io)
+    }
 }
 
 impl App {
@@ -1013,9 +1037,20 @@ impl App {
             format!(" - {}", truncate_text(&self.chat.status, 28))
         };
 
+        let mut title = vec![Span::raw(format!(" AI Chat{spinner}{status} "))];
+        if self.chat.yolo {
+            title.push(Span::styled(
+                " YOLO ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(Line::from(format!(" AI Chat{spinner}{status} ")))
+            .title(Line::from(title))
             .border_style(focus_border_style(focused));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1109,7 +1144,7 @@ impl App {
                             continue;
                         }
 
-                        for wrapped in wrap_text(&part.text, width) {
+                        for wrapped in wrap_text(&sanitize_chat_text(&part.text), width) {
                             lines.push(Line::from(wrapped));
                         }
                         had_visible_part = true;
@@ -1119,7 +1154,7 @@ impl App {
                             continue;
                         }
 
-                        let text = format!("[reasoning] {}", part.text);
+                        let text = format!("[reasoning] {}", sanitize_chat_text(&part.text));
                         let style = Style::default()
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::ITALIC);
@@ -1133,14 +1168,14 @@ impl App {
                             continue;
                         };
 
-                        let text = format_tool_line(tool);
+                        let text = sanitize_chat_text(&format_tool_line(tool));
                         for wrapped in wrap_text(&text, width) {
                             lines.push(Line::from(Span::styled(wrapped, tool_style(&tool.status))));
                         }
                         had_visible_part = true;
                     }
                     ChatPartKind::File => {
-                        let text = format!("[file] {}", part.text);
+                        let text = format!("[file] {}", sanitize_chat_text(&part.text));
                         for wrapped in wrap_text(&text, width) {
                             lines.push(Line::from(Span::styled(
                                 wrapped,
@@ -1153,7 +1188,7 @@ impl App {
             }
 
             if let Some(error) = &message.error {
-                for wrapped in wrap_text(&format!("error: {error}"), width) {
+                for wrapped in wrap_text(&sanitize_chat_text(&format!("error: {error}")), width) {
                     lines.push(Line::from(Span::styled(
                         wrapped,
                         Style::default().fg(Color::Red),
@@ -1205,7 +1240,7 @@ impl App {
         } else {
             Style::default()
         };
-        let lines = wrap_text(&display, width);
+        let lines = wrap_text(&sanitize_chat_text(&display), width);
         let visible = inner.height.max(1) as usize;
         let scroll = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
         let lines = lines.into_iter().map(Line::from).collect::<Vec<_>>();
@@ -1230,6 +1265,7 @@ impl App {
         } else {
             ""
         };
+        let yolo = if self.chat.yolo { " | YOLO" } else { "" };
         let permission = if self.chat.permission.is_some() {
             " | permission needed"
         } else {
@@ -1246,10 +1282,12 @@ impl App {
         };
 
         let text = format!(
-            " {phase}{busy}{stream}{permission} | {}{usage}",
+            " {phase}{busy}{stream}{yolo}{permission} | {}{usage}",
             self.chat.selected_model_label()
         );
-        let style = if permission.is_empty() {
+        let style = if self.chat.yolo {
+            Style::default().fg(Color::Yellow)
+        } else if permission.is_empty() {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::Yellow)
@@ -1274,7 +1312,10 @@ impl App {
             Line::from(""),
             Line::from(vec![
                 Span::raw("Action: "),
-                Span::styled(&permission.permission, Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    sanitize_chat_text(&permission.permission),
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Line::from(""),
             Line::from("Scope:"),
@@ -1284,7 +1325,7 @@ impl App {
             lines.push(Line::from("  (not specified)"));
         } else {
             for pattern in &permission.patterns {
-                lines.push(Line::from(format!("  {pattern}")));
+                lines.push(Line::from(format!("  {}", sanitize_chat_text(pattern))));
             }
         }
 
@@ -1502,12 +1543,12 @@ impl App {
     fn footer_line(&self) -> Line<'static> {
         let selected_hint = match self.focus {
             Focus::Chat => {
-                "Enter send | Shift+Enter newline | Tab back | Ctrl+M model | Ctrl+N new | Ctrl+C abort | Ctrl+Q quit"
+                "Enter send | Shift+Enter nl | Tab back | Ctrl+M model | Ctrl+N new | Ctrl+Y YOLO | Ctrl+C abort | Ctrl+Q quit"
             }
             Focus::Explorer => match self.view {
                 View::Drives => "Arrows/jk move | Enter open | r refresh | Tab chat | q quit",
                 View::Directory => {
-                    "Arrows/jk move | Enter open | Del delete | Bksp/Esc up | r rescan | d drives | Tab chat | q quit"
+                    "Arrows/jk move | Enter open | Del delete | Bksp/Esc up | r fresh scan | d drives | Tab chat | q quit"
                 }
             },
         };
@@ -1578,8 +1619,15 @@ impl App {
             return Ok(true);
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
-            return Ok(false);
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') => return Ok(false),
+                KeyCode::Char('y') => {
+                    self.toggle_yolo_mode();
+                    return Ok(true);
+                }
+                _ => {}
+            }
         }
 
         if self.chat.permission.is_some() {
@@ -1629,7 +1677,7 @@ impl App {
             KeyCode::Backspace | KeyCode::Esc => self.go_up(),
             KeyCode::Delete => self.initiate_delete(),
             KeyCode::Char('d') => self.show_drives(),
-            KeyCode::Char('r') => self.refresh_current()?,
+            KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_current()?,
             _ => {}
         }
 
@@ -1907,6 +1955,93 @@ impl App {
         });
     }
 
+    fn toggle_yolo_mode(&mut self) {
+        self.chat.yolo = !self.chat.yolo;
+        if self.chat.yolo {
+            self.chat.status = "YOLO mode on.".to_string();
+            self.chat
+                .push_notice("YOLO mode on: permission requests will be auto-approved.");
+            self.auto_accept_pending_permissions();
+        } else {
+            self.chat.status = "YOLO mode off.".to_string();
+            self.chat
+                .push_notice("YOLO mode off: permission requests will ask again.");
+        }
+    }
+
+    fn auto_accept_pending_permissions(&mut self) {
+        let Some(runtime) = self.chat.runtime.as_ref() else {
+            return;
+        };
+        let client = runtime.client.clone();
+        let tx = self.chat_tx.clone();
+
+        let mut pending = Vec::new();
+        if let Some(permission) = self.chat.permission.take() {
+            pending.push(permission);
+        }
+        pending.extend(self.chat.permission_queue.drain(..));
+        if pending.is_empty() {
+            return;
+        }
+
+        let count = pending.len();
+        self.chat.push_notice(format!(
+            "YOLO: auto-approved {count} pending permission request(s)."
+        ));
+
+        thread::spawn(move || {
+            for permission in pending {
+                let result = client.reply_permission(&permission.id, "once");
+                let _ = tx.send(ChatEvent::PermissionReplyFinished { result });
+            }
+        });
+    }
+
+    fn auto_accept_permission(&mut self, properties: &Value) {
+        let Some(id) = properties.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(runtime) = self.chat.runtime.as_ref() else {
+            self.chat.push_error(
+                "YOLO could not auto-approve a permission request because the chat is not connected.",
+            );
+            return;
+        };
+        let client = runtime.client.clone();
+        let tx = self.chat_tx.clone();
+
+        let permission = properties
+            .get("permission")
+            .and_then(Value::as_str)
+            .unwrap_or("permission");
+        let patterns = properties
+            .get("patterns")
+            .and_then(Value::as_array)
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+
+        let detail = if patterns.is_empty() {
+            permission.to_string()
+        } else {
+            format!("{permission} ({})", truncate_text(&patterns, 80))
+        };
+        self.chat
+            .push_notice(format!("[YOLO] auto-approved {detail}."));
+
+        let id = id.to_string();
+        thread::spawn(move || {
+            let result = client.reply_permission(&id, "once");
+            let _ = tx.send(ChatEvent::PermissionReplyFinished { result });
+        });
+    }
+
     fn process_chat_events(&mut self) {
         while let Ok(event) = self.chat_rx.try_recv() {
             self.handle_chat_event(event);
@@ -2096,7 +2231,14 @@ impl App {
                 self.chat.status = "The assistant reported an error.".to_string();
                 self.chat.push_error(message);
             }
-            "permission.asked" => self.chat.enqueue_permission(&properties),
+            "permission.asked" => {
+                if self.chat.yolo {
+                    self.auto_accept_permission(&properties);
+                } else {
+                    self.chat.enqueue_permission(&properties);
+                }
+            }
+
             "question.asked" => self.handle_question_asked(&properties),
             _ => {}
         }
@@ -2579,7 +2721,20 @@ impl App {
             }
             View::Directory => {
                 if let Some(path) = self.current_path.clone() {
-                    self.navigate_to(path);
+                    let display_path = platform::display_path(&path);
+                    let cache_result = self.cache_store.delete_subtree(&path);
+                    self.navigate_to_fresh(path);
+                    self.status = match cache_result {
+                        Ok(count) => {
+                            let noun = if count == 1 { "entry" } else { "entries" };
+                            format!(
+                                "Cleared {count} cache {noun} for {display_path}; rescanning from scratch..."
+                            )
+                        }
+                        Err(error) => format!(
+                            "Could not clear cache for {display_path}: {error}; rescanning from scratch..."
+                        ),
+                    };
                 }
             }
         }
@@ -2674,6 +2829,14 @@ impl App {
     }
 
     fn navigate_to(&mut self, path: PathBuf) {
+        self.navigate_to_with_cache(path, true);
+    }
+
+    fn navigate_to_fresh(&mut self, path: PathBuf) {
+        self.navigate_to_with_cache(path, false);
+    }
+
+    fn navigate_to_with_cache(&mut self, path: PathBuf, use_cache: bool) {
         self.view = View::Directory;
         self.current_path = Some(path.clone());
         self.entries.clear();
@@ -2694,6 +2857,7 @@ impl App {
             self.scanner_tx.clone(),
             Arc::clone(&self.scan_generation),
             self.cache_store.clone(),
+            use_cache,
         );
     }
 
@@ -3025,6 +3189,20 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn sanitize_chat_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character == '\n' || character == '\t' {
+            output.push(character);
+        } else if character.is_control() {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
 fn split_at_char(text: &str, index: usize) -> (String, String) {
     let byte_index = char_to_byte_index(text, index);
     (
@@ -3148,6 +3326,7 @@ fn spawn_scan(
     sender: Sender<ScanEvent>,
     generation: Arc<AtomicU64>,
     cache_store: CacheStore,
+    use_cache: bool,
 ) {
     thread::spawn(move || {
         let mut error_count = 0usize;
@@ -3163,7 +3342,11 @@ fn spawn_scan(
                 return;
             }
         };
-        let preload_cache_conn = cache_store.open_connection().ok();
+        let preload_cache_conn = if use_cache {
+            cache_store.open_connection().ok()
+        } else {
+            None
+        };
 
         let read_dir = match fs::read_dir(&path) {
             Ok(read_dir) => read_dir,
@@ -3184,7 +3367,7 @@ fn spawn_scan(
 
             match result {
                 Ok(dir_entry) => {
-                    match build_entry(&dir_entry, preload_cache_conn.as_ref(), &policy) {
+                    match build_entry(&dir_entry, preload_cache_conn.as_ref(), &policy, use_cache) {
                         Ok(entry) => entries.push(entry),
                         Err(_) => error_count += 1,
                     }
@@ -3209,7 +3392,7 @@ fn spawn_scan(
             if entry.kind == EntryKind::Directory {
                 directories.push(DirectoryTask {
                     path: entry.path.clone(),
-                    cached_hint: entry.size_state == SizeState::Cached,
+                    cached_hint: use_cache && entry.size_state == SizeState::Cached,
                 });
             }
 
@@ -3228,7 +3411,15 @@ fn spawn_scan(
                 let cache_store = cache_store.clone();
                 let policy = Arc::clone(&policy);
                 handles.push(thread::spawn(move || {
-                    scan_directory_queue(request_id, queue, sender, generation, cache_store, policy)
+                    scan_directory_queue(
+                        request_id,
+                        queue,
+                        sender,
+                        generation,
+                        cache_store,
+                        policy,
+                        use_cache,
+                    )
                 }));
             }
 
@@ -3260,6 +3451,7 @@ fn build_entry(
     dir_entry: &fs::DirEntry,
     cache_conn: Option<&Connection>,
     policy: &ScanPolicy,
+    use_cache: bool,
 ) -> io::Result<EntryInfo> {
     let path = dir_entry.path();
     let metadata = fs::symlink_metadata(&path)?;
@@ -3276,18 +3468,18 @@ fn build_entry(
             };
             (kind, 0, SizeState::Complete)
         } else if file_type.is_dir() && !is_reparse_point {
-            if let Some(conn) = cache_conn {
-                if let Ok(Some(cached)) = load_cached_directory(conn, &path) {
-                    (
-                        EntryKind::Directory,
-                        cached.recursive_size,
-                        SizeState::Cached,
-                    )
-                } else {
-                    (EntryKind::Directory, 0, SizeState::Pending)
-                }
+            let cached = if use_cache {
+                cache_conn.and_then(|conn| load_cached_directory(conn, &path).ok().flatten())
             } else {
-                (EntryKind::Directory, 0, SizeState::Pending)
+                None
+            };
+            match cached {
+                Some(cached) => (
+                    EntryKind::Directory,
+                    cached.recursive_size,
+                    SizeState::Cached,
+                ),
+                None => (EntryKind::Directory, 0, SizeState::Pending),
             }
         } else if file_type.is_file() && !is_reparse_point {
             (EntryKind::File, metadata.len(), SizeState::Complete)
@@ -3313,6 +3505,7 @@ fn scan_directory_queue(
     generation: Arc<AtomicU64>,
     cache_store: CacheStore,
     policy: Arc<ScanPolicy>,
+    use_cache: bool,
 ) -> usize {
     let mut error_count = 0usize;
     let cache_conn = cache_store.open_connection().ok();
@@ -3339,10 +3532,12 @@ fn scan_directory_queue(
             &sender,
             cache_conn.as_ref(),
             &policy,
+            use_cache,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_directory_size(
     root_path: &Path,
     cached_hint: bool,
@@ -3351,6 +3546,7 @@ fn compute_directory_size(
     sender: &Sender<ScanEvent>,
     cache_conn: Option<&Connection>,
     policy: &ScanPolicy,
+    use_cache: bool,
 ) -> usize {
     let mut progress = DirectoryProgress::new();
     let allow_partial_updates = !cached_hint;
@@ -3364,6 +3560,7 @@ fn compute_directory_size(
         &mut progress,
         cache_conn,
         policy,
+        use_cache,
     );
 
     if generation.load(Ordering::Relaxed) != request_id {
@@ -3396,6 +3593,7 @@ fn scan_directory_recursive(
     progress: &mut DirectoryProgress,
     cache_conn: Option<&Connection>,
     policy: &ScanPolicy,
+    use_cache: bool,
 ) -> DirectoryScanResult {
     if generation.load(Ordering::Relaxed) != request_id {
         return DirectoryScanResult {
@@ -3421,7 +3619,10 @@ fn scan_directory_recursive(
     };
 
     let mut error_count = listing.error_count;
-    if listing.cacheable {
+    // A directory with child directories can change deep inside without changing
+    // its own listing fingerprint, so its cached recursive size is not safe to
+    // reuse. Only leaf directories can be validated from their immediate listing.
+    if use_cache && listing.child_dirs.is_empty() && listing.cacheable {
         if let Some(conn) = cache_conn {
             if let Ok(Some(cached)) = load_cached_directory(conn, current_path) {
                 if cached.listing_fingerprint == listing.fingerprint {
@@ -3463,6 +3664,7 @@ fn scan_directory_recursive(
             progress,
             cache_conn,
             policy,
+            use_cache,
         );
         total_bytes = total_bytes.saturating_add(child_result.size_bytes);
         error_count += child_result.error_count;
@@ -3666,6 +3868,28 @@ fn save_cached_directory(
     .map_err(sqlite_err_to_io)?;
 
     Ok(())
+}
+
+fn cache_subtree_prefix(display_path: &str) -> String {
+    let trimmed = display_path.trim_end_matches(['/', '\\']);
+    let separator = std::path::MAIN_SEPARATOR;
+    let base = if trimmed.is_empty() {
+        separator.to_string()
+    } else {
+        format!("{trimmed}{separator}")
+    };
+    format!("{}%", escape_like_prefix(&base))
+}
+
+fn escape_like_prefix(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '!' | '%' | '_') {
+            escaped.push('!');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn current_unix_timestamp() -> i64 {

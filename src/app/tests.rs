@@ -21,6 +21,7 @@ mod linux {
             &mut DirectoryProgress::new(),
             conn,
             &ScanPolicy::new(path).unwrap(),
+            true,
         )
     }
 
@@ -43,7 +44,7 @@ mod linux {
             .find(|entry| entry.file_name() == "loop")
             .unwrap();
         assert_eq!(
-            build_entry(&link, None, &ScanPolicy::new(&root).unwrap())
+            build_entry(&link, None, &ScanPolicy::new(&root).unwrap(), true)
                 .unwrap()
                 .kind,
             EntryKind::Link
@@ -128,7 +129,7 @@ mod linux {
             .map(Result::unwrap)
             .find(|entry| entry.file_name() == "proc")
             .unwrap();
-        let initial = build_entry(&entry, None, &policy).unwrap();
+        let initial = build_entry(&entry, None, &policy, true).unwrap();
         assert_eq!(initial.kind, EntryKind::Virtual);
         assert_eq!(initial.size_state, SizeState::Complete);
         assert!(!initial.kind.can_enter());
@@ -147,6 +148,7 @@ mod linux {
             &mut DirectoryProgress::new(),
             Some(&conn),
             &policy,
+            true,
         );
         assert_eq!(result.size_bytes, 38);
         assert_eq!(result.error_count, 0);
@@ -155,6 +157,59 @@ mod linux {
         assert!(policy.check_deletion(&root.join("direct")).is_ok());
         assert!(ScanPolicy::new(Path::new("/proc")).is_err());
     }
+}
+
+fn scan_tree(path: &Path, conn: Option<&Connection>) -> DirectoryScanResult {
+    let (sender, _) = mpsc::channel();
+    let generation = Arc::new(AtomicU64::new(1));
+    scan_directory_recursive(
+        path,
+        path,
+        false,
+        1,
+        &generation,
+        &sender,
+        &mut DirectoryProgress::new(),
+        conn,
+        &ScanPolicy::new(path).unwrap(),
+        true,
+    )
+}
+
+#[test]
+fn deep_file_changes_invalidate_ancestor_cache() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("file"), [0; 7]).unwrap();
+    let cache = CacheStore::new(fixture.path()).unwrap();
+    let conn = cache.open_connection().unwrap();
+
+    assert_eq!(scan_tree(&root, Some(&conn)).size_bytes, 7);
+    fs::write(nested.join("file"), [0; 42]).unwrap();
+    assert_eq!(scan_tree(&root, Some(&conn)).size_bytes, 42);
+}
+
+#[test]
+fn deletes_cache_subtree() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let child = root.join("child");
+    let sibling = fixture.path().join("sibling");
+    fs::create_dir_all(&child).unwrap();
+    fs::create_dir_all(&sibling).unwrap();
+    let cache = CacheStore::new(fixture.path()).unwrap();
+    let conn = cache.open_connection().unwrap();
+
+    save_cached_directory(&conn, &root, "root", 1).unwrap();
+    save_cached_directory(&conn, &child, "child", 2).unwrap();
+    save_cached_directory(&conn, &sibling, "sibling", 3).unwrap();
+
+    assert_eq!(cache.delete_subtree(&root).unwrap(), 2);
+    assert!(load_cached_directory(&conn, &root).unwrap().is_none());
+    assert!(load_cached_directory(&conn, &child).unwrap().is_none());
+    assert!(load_cached_directory(&conn, &sibling).unwrap().is_some());
 }
 
 fn test_app() -> App {
@@ -267,6 +322,11 @@ fn draws_chat_layout_in_all_states() {
     assert!(text.contains("Message"));
     assert!(text.contains("opencode-go/deepseek-v4.1-flash"));
 
+    app.chat.yolo = true;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(buffer_text(&terminal).contains("YOLO"));
+    app.chat.yolo = false;
+
     app.focus = Focus::Explorer;
     terminal.draw(|frame| app.draw(frame)).unwrap();
 
@@ -290,6 +350,38 @@ fn draws_chat_layout_in_all_states() {
     let text = buffer_text(&terminal);
     assert!(text.contains("Permission Required"));
     assert!(text.contains("bash"));
+}
+
+#[test]
+fn toggles_yolo_mode() {
+    let mut app = test_app();
+    assert!(!app.chat.yolo);
+
+    app.toggle_yolo_mode();
+    assert!(app.chat.yolo);
+    assert!(app.chat.messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| part.text.contains("YOLO mode on"))
+    }));
+
+    app.toggle_yolo_mode();
+    assert!(!app.chat.yolo);
+    assert!(app.chat.messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| part.text.contains("YOLO mode off"))
+    }));
+}
+
+#[test]
+fn sanitizes_chat_control_characters() {
+    assert_eq!(
+        sanitize_chat_text("ok\nnext\ttab\x1b[31m"),
+        "ok\nnext\ttab\\u{1b}[31m"
+    );
 }
 
 #[test]
